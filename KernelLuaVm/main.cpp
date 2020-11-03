@@ -6,9 +6,71 @@
 #include "driver_io.hpp"
 #include "lua/api.hpp"
 
-// Global Lua context.
+// Global Lua context and attaching helpers.
 //
 lua_State* L = nullptr;
+
+PEPROCESS attached_process = nullptr;
+KAPC_STATE apc_state;
+
+namespace lua
+{
+    static void begin_ctx()
+    {
+        if ( attached_process )
+        {
+            if ( PsGetProcessExitStatus( attached_process ) != STATUS_PENDING )
+            {
+                ObDereferenceObject( attached_process );
+                attached_process = nullptr;
+            }
+            else
+            {
+                KeStackAttachProcess( attached_process, &apc_state );
+            }
+        }
+    }
+    static void end_ctx()
+    {
+        if ( attached_process )
+            KeUnstackDetachProcess( &apc_state );
+    }
+
+    bool detach()
+    {
+        if ( !attached_process )
+            return false;
+        KeUnstackDetachProcess( &apc_state );
+        ObDereferenceObject( attached_process );
+        attached_process = nullptr;
+        return true;
+    }
+    bool attach_process( PEPROCESS process )
+    {
+        if ( ObReferenceObjectSafe( process ) )
+        {
+            detach();
+            attached_process = process;
+            KeStackAttachProcess( process, &apc_state );
+            return true;
+        }
+        return false;
+    }
+    bool attach_pid( uint64_t pid )
+    {
+        PEPROCESS process = nullptr;
+        PsLookupProcessByProcessId( ( HANDLE ) pid, &process );
+        if ( !process ) 
+            return false;
+
+        detach();
+        attached_process = process;
+        KeStackAttachProcess( process, &apc_state );
+        return true;
+    }
+};
+
+
 
 // Device control handler.
 //
@@ -33,9 +95,16 @@ NTSTATUS device_control( PDEVICE_OBJECT device_object, PIRP irp )
         //
         if ( input && input_length && input[ input_length - 1 ] == 0x0 )
         {
+            // Reset logger buffers.
+            //
+            logger::errors.reset();
+            logger::logs.reset();
+
             // Execute the code in the buffer.
             //
+            lua::begin_ctx();
             lua::execute( L, input, true );
+            lua::end_ctx();
 
             // Zero out the result.
             //
@@ -49,7 +118,7 @@ NTSTATUS device_control( PDEVICE_OBJECT device_object, PIRP irp )
                 // Allocate user-mode memory to hold this buffer.
                 //
                 void* region = nullptr;
-                size_t size = buf.iterator;
+                size_t size = buf.iterator + 1;
                 ZwAllocateVirtualMemory( NtCurrentProcess(), ( void** ) &region, 0, &size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
                 
                 // Copy the buffer if allocation was succesful.
@@ -82,11 +151,6 @@ NTSTATUS device_control( PDEVICE_OBJECT device_object, PIRP irp )
                     result->outputs = export_buffer( logger::logs );
                 irp->IoStatus.Information = sizeof( ntlua_result );
             }
-
-            // Reset logger buffers.
-            //
-            logger::errors.reset();
-            logger::logs.reset();
         }
 
         // Declare success and return.

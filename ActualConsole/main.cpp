@@ -42,6 +42,18 @@ int main()
             buffer += "\n" + buffer2;
         }
 
+        // Handle special commands:
+        //
+        if ( buffer == "clear" )
+        {
+            system( "cls" );
+            continue;
+        }
+        else if ( buffer == "cmd" )
+            return system( "cmd" );
+        else if ( buffer == "exit" )
+            return 0;
+
         // Send IOCTL.
         //
         ntlua_result result = { 
